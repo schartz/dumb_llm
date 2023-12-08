@@ -66,10 +66,30 @@ class GPTLanguageModel(nn.Module):
         self.blocks = nn.Sequential(*[Block(NUM_EMBEDDINGS, NUM_ATTENTION_HEADS) for _ in range(NUM_ND_CODERS)])
         self.layer_norm_final = nn.LayerNorm(NUM_EMBEDDINGS)
         self.lm_head = nn.Linear(NUM_EMBEDDINGS, VOCAB_SIZE)
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+        else:
+            print("nothing to normalize in module", module)
+
 
     def forward(self, index, targets = None):
         logits: torch.Tensor = self.token_embedding_table(index)
 
+        # index and targets are both tensors of integers with shape (B, T)
+        token_embedding = self.token_embedding_table(index)     # (B, T, C)
+        position_embedding = self.positional_embedding_table(torch.arange(T, device=device))   # (T, C)
+        x = token_embedding + position_embedding    # (B, T, C), also refer to https://pytorch.org/docs/stable/notes/broadcasting.html
+        x = self.blocks(x)      # (B, T, C)
+        x = self.layer_norm_final(x)    # (B, T, C)
+        logits = self.lm_head(x)    # (B, T, VOCAB_SIZE)
+        
         if targets == None:
             loss = None
         else:

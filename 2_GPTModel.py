@@ -18,6 +18,7 @@ VOCAB_SIZE = len(chars)
 NUM_EMBEDDINGS = 128    # dimensions of vector for each token
 NUM_ND_CODERS = 4       # number of encoders/decoders in the network
 NUM_ATTENTION_HEADS = 4
+DROPOUT = 0.2
 
 # variables for model
 str_to_int = {ch: i for i, ch in enumerate(chars)}
@@ -53,6 +54,101 @@ def estimate_loss(model):
         out[split] = losses.mean()
     model.train()
     return out
+
+
+class Head(nn.Module):
+    """Single self attention head"""
+    
+    def __init__(self, head_size):
+        super().__init__()
+        self.key = nn.Linear(NUM_EMBEDDINGS, head_size, bias=False)
+        self.query = nn.Linear(NUM_EMBEDDINGS, head_size, bias=False)
+        self.value = nn.Linear(NUM_EMBEDDINGS, head_size, bias=False)
+        self.register_buffer('tril', torch.tril(torch.ones(BLOCK_SIZE, BLOCK_SIZE)))
+        self.dropout = nn.Dropout(DROPOUT)
+
+        def forward(self, x):
+            # input is of shape (batch -> B, time step -> T, channels/features -> C) hence shape (B, T, C)
+            # output is of shape (batch -> B, time step -> T, channels/features -> C) hence shape (B, T, C)
+            B, T, C = x.shape()
+
+            # key and query are of shape (B, T, head_size)
+            key, query = self.key(x), self.query(x)
+
+            # computing attention scores aka "affinities"
+
+            # (B, T, head_size) @ (B, head_size, T) ---> (B, T, T)
+            wei = query @ key.traspose(-2, -1) * k.shape[-1]**-0.5
+            wei = wei.masked_fill(self.tril[:T, :T] == 0, float(-inf))  # (B, T, T)
+            wei = F.softmax(wei, dim=-1)    # (B, T, T)
+            wei = self.dropout(wei)
+
+
+            # performing the weighted aggregation of the values
+            value = self.value(x)   # (B, T, head_size)
+            out = wei @ value   # (B, T, T) @ (B, T, head_size) ---> (B, T, head_size)
+            return out
+
+
+
+
+
+class MultiHeadAttention(nn.Module):
+    """Hultiple self attention heads in parallel"""
+    def __init__(self, num_attention_heads, head_size):
+        super().__init__()
+        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_attention_heads)])
+        self.projection = nn.Linear(head_size * num_attention_heads, NUM_EMBEDDINGS)
+        self.dropout = nn.Dropout(DROPOUT)
+
+    def forward(self, x):
+        # input shape is (B, T, C). So it will concatenate along the channel (aka feature dimension)
+        # it looks like following. for example:
+        # (B, T, [h1, h1, h2, h2, h3, h3]) --> we have 2 features per head and we have 3 heads in total
+        # in this case we use torch.cat to concatenate along the last shape list element
+        out = torch.cat([h(x) for h in self.heads], dim=-1) 
+        out = self.dropout(self.projection(out))
+        return out
+
+
+class FeedForward(nn.Module):
+    def __init__(self, num_embeddings):
+        super().__init__()
+        self.network = nn.Sequential(
+            nn.Linear(num_embeddings, 4*num_embeddings),
+            nn.ReLU(),
+            nn.Linear(4*num_embeddings, num_embeddings),
+            nn.Dropout(DROPOUT) # helps in preventing overfitting
+        )
+    def forward(self, x):
+        return self.network(x)
+
+
+
+class Block(nn.Module):
+    """Transformer block: communication followed by computation"""
+    def __init__(self, num_embeddings, num_attention_heads):
+        super().__init__()
+        # head_size is the number of features each head head will aquire in our multiheaded attention
+        head_size = num_embeddings // num_attention_heads
+        self.self_attention = MultiHeadAttention(num_attention_heads, head_size)
+        self.feed_forward = FeedForward(num_embeddings)
+        self.linear1 = nn.LayerNorm(num_embeddings)
+        self.linear2 = nn.LayerNorm(num_embeddings)
+    
+    def forward(self, x):
+        """This forward function implements 'post norm, pre norm' architecture.
+            Note that we perform layer normalization both before and after the feed forward layer.
+            This converges better for transformers in general.
+            Also notice thet we add the inputs first and then normalize.
+        """
+        y = self.self_attention(x)
+        x = self.linear1(x + y)
+        y = self.feed_forward(x)
+        x = self.linear2(x + y)
+        return x
+
+
 
 
 # model definitaion for a simple GPT/Transformer model
